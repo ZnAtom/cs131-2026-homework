@@ -1,0 +1,41 @@
+# OCaml / Dune build artifacts and local package environments
+_build/
+_opam/
+*.cmi
+*.cmo
+*.cmx
+*.cmxa
+*.cma
+*.cmxs
+*.cmt
+*.cmti
+*.o
+*.a
+*.exe
+oatc
+ocamlbin
+
+# Downloaded stubs and generated submission archives
+*.zip
+
+# Local environment, editor state, and credentials
+.direnv/
+.vscode/
+.idea/
+/.agents/
+/.codex/
+/.aws/
+.env
+.env.*
+!.env.example
+!.env.sample
+*.swp
+*.swo
+*~
+
+# Operating system metadata
+.DS_Store
+._*
+__MACOSX/
+Thumbs.db
+Desktop.ini

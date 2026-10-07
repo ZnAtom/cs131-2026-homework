@@ -1,0 +1,12 @@
+(executables
+ (public_names main translate factorial)
+ (names main translate factorial)
+ (promote (until-clean))
+ )
+
+(env
+ (dev
+  (flags
+   (:standard -w "+a-4-7-9-27-29-30-32..42-44-45-48-50-60-66..70")
+   ))) 
+
