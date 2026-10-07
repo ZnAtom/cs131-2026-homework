@@ -1,2 +1,0 @@
-bin/hellocaml.ml
-test/studenttests.ml
