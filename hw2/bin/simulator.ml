@@ -256,6 +256,15 @@ let fetchins (m:mach) (addr:quad) : ins =
   | Byte _ -> failwith "expected an instruction"
   (* failwith "fetchins not implemented" *)
 
+let effective_addr (m:mach) : operand -> quad = function
+  | Ind1 (Lit addr) -> addr
+  | Ind2 r -> m.regs.(rind r)
+  | Ind3 (Lit offset, r) -> offset +. m.regs.(rind r)
+  | _ -> invalid_arg "effective_addr: expected a resolved memory operand"
+
+let shift_amount (amount:quad) : int =
+  Int64.to_int (Int64.logand amount 0x3fL)
+
 (* Compute the instruction result.
  * NOTE: See int64_overflow.ml for the definition of the return type
 *  Int64_overflow.t. *)
@@ -280,9 +289,9 @@ let interp_opcode (m: mach) (o:opcode) (args:int64 list) : Int64_overflow.t =
     |Movq , [src; _] -> ok src
 
     |Leaq, [src; _] -> ok src 
-    |Shlq, [sh; dst] -> ok (shift_left dst (to_int sh))
-    |Sarq, [sh; dst] -> ok (shift_right dst (to_int sh))
-    |Shrq, [sh; dst] -> ok (shift_right_logical dst (to_int sh))
+    |Shlq, [sh; dst] -> ok (shift_left dst (shift_amount sh))
+    |Sarq, [sh; dst] -> ok (shift_right dst (shift_amount sh))
+    |Shrq, [sh; dst] -> ok (shift_right_logical dst (shift_amount sh))
 
     |Set condition , [_] -> ok (if interp_cnd m.flags condition then 1L else 0L)
     |Jmp,  [target] ->  ok target
@@ -293,19 +302,86 @@ let interp_opcode (m: mach) (o:opcode) (args:int64 list) : Int64_overflow.t =
     | Retq, []        -> ok 0L *)
 
     
-    | _ -> failwith "interp_opcode not implemented"
+    | _ -> invalid_arg "interp_opcode: unsupported instruction or operands"
 
 (** Update machine state with instruction results. *)
-let ins_writeback (m: mach) : ins -> int64 -> unit  = 
-  failwith "ins_writeback not implemented"
+let ins_writeback (m: mach) : ins -> int64 -> unit =
+  fun (op, args) result ->
+    let write_quad = function
+      | Reg r -> m.regs.(rind r) <- result
+      | dst -> writequad m (effective_addr m dst) result
+    in
+    let write_byte = function
+      | Reg r ->
+          let upper = Int64.logand m.regs.(rind r) (Int64.lognot 0xffL) in
+          let lower = Int64.logand result 0xffL in
+          m.regs.(rind r) <- Int64.logor upper lower
+      | dst ->
+          let idx = map_addr_segfault (effective_addr m dst) in
+          let lower = Int64.to_int (Int64.logand result 0xffL) in
+          m.mem.(idx) <- Byte (Char.chr lower)
+    in
+    match op, args with
+    | Cmpq, [_; _] -> ()
+    | (Jmp | J _), [_] -> m.regs.(rind Rip) <- result
+    | Set _, [dst] -> write_byte dst
+    | (Negq | Incq | Decq | Notq), [dst] -> write_quad dst
+    | (Movq | Leaq | Addq | Subq | Imulq | Andq | Orq | Xorq
+      | Shlq | Sarq | Shrq), [_; dst] -> write_quad dst
+    | _ -> invalid_arg "ins_writeback: unsupported instruction"
 
 
 (* mem addr ---> mem array index *)
-let interp_operands (m:mach) : ins -> int64 list = 
-  failwith "interp_operands not implemented"
+let interp_operands (m:mach) : ins -> int64 list =
+  fun (op, args) ->
+    let read_operand = function
+      | Imm (Lit value) -> value
+      | Reg r -> m.regs.(rind r)
+      | (Ind1 _ | Ind2 _ | Ind3 _) as operand ->
+          readquad m (effective_addr m operand)
+      | Imm (Lbl _) -> invalid_arg "interp_operands: unresolved label"
+    in
+    match op, args with
+    | Movq, [src; _] -> [read_operand src; 0L]
+    | Leaq, [src; _] -> [effective_addr m src; 0L]
+    | Set _, [_] -> [0L]
+    | _ -> List.map read_operand args
 
 let validate_operands : ins -> unit = function
-  | _ -> failwith "validate_operands not implemented"
+  | ins ->
+      let memory = function
+        | Ind1 _ | Ind2 _ | Ind3 _ -> true
+        | Imm _ | Reg _ -> false
+      in
+      let location = function
+        | Reg _ | Ind1 _ | Ind2 _ | Ind3 _ -> true
+        | Imm _ -> false
+      in
+      let check condition =
+        if not condition then invalid_arg "validate_operands: invalid operands"
+      in
+      let op, args = ins in
+      List.iter (function
+        | Imm (Lbl _) | Ind1 (Lbl _) | Ind3 (Lbl _, _) ->
+            invalid_arg "validate_operands: unresolved label"
+        | _ -> ()) args;
+      match op, args with
+      | Retq, [] -> ()
+      | (Pushq | Callq | Jmp | J _), [_] -> ()
+      | (Popq | Negq | Incq | Decq | Notq | Set _), [dst] ->
+          check (location dst)
+      | Leaq, [src; dst] ->
+          check (memory src && location dst && not (memory dst))
+      | Imulq, [_; Reg _] -> ()
+      | (Shlq | Sarq | Shrq), [amount; dst] ->
+          let valid_amount = match amount with
+            | Imm (Lit _) | Reg Rcx -> true
+            | _ -> false
+          in
+          check (valid_amount && location dst)
+      | (Movq | Addq | Subq | Cmpq | Andq | Orq | Xorq), [src; dst] ->
+          check (location dst && not (memory src && memory dst))
+      | _ -> invalid_arg "validate_operands: invalid instruction"
 
 
 let crack : ins -> ins list = function
@@ -339,9 +415,36 @@ let crack : ins -> ins list = function
  *)
 
  
-(* TODO: double check against spec *)
 let set_flags (m:mach) (op:opcode) (ws: quad list) (w : Int64_overflow.t) : unit =
-  failwith "set_flags not implemented"
+  let set_sign_zero () =
+    m.flags.fs <- w.value <. 0L;
+    m.flags.fz <- w.value = 0L
+  in
+  match op with
+  | Negq | Incq | Decq | Addq | Subq | Cmpq ->
+      set_sign_zero ();
+      m.flags.fo <- w.overflow
+  | Imulq -> m.flags.fo <- w.overflow
+  | Andq | Orq | Xorq ->
+      set_sign_zero ();
+      m.flags.fo <- false
+  | Shlq | Sarq | Shrq ->
+      (match ws with
+       | [amount; original] ->
+           let amount = shift_amount amount in
+           if amount <> 0 then begin
+             set_sign_zero ();
+             if amount = 1 then
+               m.flags.fo <- (match op with
+                 | Sarq -> false
+                 | Shrq -> original <. 0L
+                 | Shlq ->
+                     (original <. 0L) <> (Int64.shift_left original 1 <. 0L)
+                 | _ -> assert false)
+           end
+       | _ -> invalid_arg "set_flags: invalid shift operands")
+  | Movq | Leaq | Notq | Set _ | Jmp | J _
+  | Pushq | Popq | Callq | Retq -> ()
 
 let step (m:mach) : unit =
   (* execute an instruction *)
