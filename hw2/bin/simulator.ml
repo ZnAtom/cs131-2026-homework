@@ -150,13 +150,21 @@ let ( >=. ) a b = (Int64.compare a b) >= 0
 
 (* Interpret a condition code with respect to the given flags. *)
 (* !!! Check the Specification for Help *)
-let interp_cnd {fo; fs; fz} : cnd -> bool = fun x -> failwith "interp_cnd unimplemented"
+let interp_cnd {fo; fs; fz} : cnd -> bool = function
+  | Eq -> fz
+  | Neq -> not fz
+  | Lt -> fs <> fo
+  | Le -> fz || (fs <> fo)
+  | Ge -> fs = fo
+  | Gt -> (not fz) && (fs = fo)
 
 
 (* Maps an X86lite address into Some OCaml array index,
    or None if the address is not within the legal address space. *)
 let map_addr (addr:quad) : int option =
-  failwith "map_addr not implemented"
+  if addr >=. mem_bot && addr <. mem_top then 
+    Some (Int64.to_int(addr -. mem_bot))
+  else None
 
 (* Your simulator should raise this exception if it tries to read from or
    store to an address not within the valid address space. *)
@@ -164,8 +172,9 @@ exception X86lite_segfault
 
 (* Raise X86lite_segfault when addr is invalid. *)
 let map_addr_segfault (addr:quad) : int =
-  failwith "map_addr_segfault not implemented"
-
+  match map_addr addr with
+  | Some i -> i
+  | None -> raise X86lite_segfault
 (* Simulates one step of the machine:
     - fetch the instruction at %rip
     - compute the source and/or destination information from the operands
@@ -180,14 +189,72 @@ let map_addr_segfault (addr:quad) : int =
 *)
 
 let readquad (m:mach) (addr:quad) : quad =
-  failwith "readquad not implemented"
+int64_of_sbytes 
+  (List.init 8 (fun i ->
+    let a = addr +. (Int64.of_int i) in
+    let idx = map_addr_segfault a in
+    m.mem.(idx)
+    ))
+
+(* 首先，int64_of_sbytes，因为输出是int64
+  其次，应该使用+.*)
 
 
 let writequad (m:mach) (addr:quad) (w:quad) : unit =
-  failwith "writequad not implemented"
+  let byte = sbytes_of_int64 w in
+  List.iteri (fun i _ ->
+    let a = addr +. Int64.of_int i in 
+    ignore(map_addr_segfault a) 
+    )byte;
+  List.iteri (fun i element ->
+    let a = addr +. Int64.of_int i in 
+    let idx = map_addr_segfault a in 
+    m.mem.(idx) <- element
+    )byte
+  (* failwith "writequad not implemented" *)
+
+(* 
+List.iteri 会遍历列表，同时提供元素下标：
+List.iteri (fun i element ->
+  (* 使用 i 和 element *)
+) list
+
+
+List.iteri 的回调必须返回 unit
+它的类型是：
+List.iteri : (int -> 'a -> unit) -> 'a list -> unit
+第一个参数是回调函数，接收下标和元素，每次调用必须返回 unit。
+你的第一遍遍历最后写的是：
+map_addr_segfault a
+这个表达式返回 int，所以回调返回了整数，与 List.iteri 要求的 unit 不匹配。
+这里你只想确认地址合法，不需要保存下标，可以使用：
+ignore (map_addr_segfault a)
+ignore 的含义是：先执行参数表达式，再丢弃它的返回值，返回 ()。
+
+
+
+
+第一遍遍历
+第二遍遍历
+OCaml 中，换行不是语句分隔符。连续写两个表达式，编译器可能把后面的内容当成前面函数调用的额外参数，导致“参数过多”等类型错误。
+要表达“先执行 A，再执行 B”，使用：
+表达式A;
+表达式B
+所以第一遍遍历结束处应该是：
+) byte;
+第二遍结束处仍然是：
+) byte
+
+
+*)
 
 let fetchins (m:mach) (addr:quad) : ins =
-  failwith "fetchins not implemented"
+  let idx = map_addr_segfault addr in 
+  match m.mem.(idx) with
+  | InsB0 ins -> ins
+  | InsFrag -> failwith "expected an instruction"
+  | Byte _ -> failwith "expected an instruction"
+  (* failwith "fetchins not implemented" *)
 
 (* Compute the instruction result.
  * NOTE: See int64_overflow.ml for the definition of the return type
@@ -196,7 +263,37 @@ let interp_opcode (m: mach) (o:opcode) (args:int64 list) : Int64_overflow.t =
     let open Int64 in
     let open Int64_overflow in
     match o, args with
-      | _ -> failwith "interp_opcode not implemented"
+    | Negq , [value] -> neg value
+    | Incq , [value] -> succ value
+    | Decq , [value] -> pred value
+
+    | Addq , [src; dst] -> add dst src
+    | Subq , [src; dst] -> sub dst src
+    | Imulq , [src; dst] -> mul dst src
+
+    | Andq , [src; dst] -> ok (Int64.logand dst src)
+    | Orq , [src; dst] -> ok (Int64.logor dst src)
+    | Xorq , [src; dst] -> ok (Int64.logxor dst src)
+    | Notq , [v] -> ok (Int64.lognot v)
+
+    |Cmpq , [src; dst] -> sub dst src
+    |Movq , [src; _] -> ok src
+
+    |Leaq, [src; _] -> ok src 
+    |Shlq, [sh; dst] -> ok (shift_left dst (to_int sh))
+    |Sarq, [sh; dst] -> ok (shift_right dst (to_int sh))
+    |Shrq, [sh; dst] -> ok (shift_right_logical dst (to_int sh))
+
+    |Set condition , [_] -> ok (if interp_cnd m.flags condition then 1L else 0L)
+    |Jmp,  [target] ->  ok target
+    |J condition, [target] -> 
+      if interp_cnd m.flags condition then ok target
+      else ok m.regs.(rind Rip)
+    (* | Callq, [target] -> ok target
+    | Retq, []        -> ok 0L *)
+
+    
+    | _ -> failwith "interp_opcode not implemented"
 
 (** Update machine state with instruction results. *)
 let ins_writeback (m: mach) : ins -> int64 -> unit  = 
@@ -212,7 +309,34 @@ let validate_operands : ins -> unit = function
 
 
 let crack : ins -> ins list = function
-  | _ -> failwith "crack not implemented"
+  | Pushq, [src] -> 
+    [
+      (Subq, [Imm (Lit 8L ); Reg Rsp]);
+      (Movq, [src; Ind2 Rsp])
+    ]
+  | Popq, [dst] -> 
+    [
+      (Movq, [Ind2 Rsp; dst]);
+      (Addq, [Imm (Lit 8L); Reg Rsp])
+    ]
+  | Callq, [target] -> 
+    [
+      (Subq, [Imm (Lit 8L); Reg Rsp]);
+      (Movq, [Reg Rip; Ind2 Rsp]);
+      (Jmp, [target])
+    ]
+  | Retq, [] -> 
+    [
+      (Movq, [Ind2 Rsp; Reg Rip]);
+      (Addq, [Imm (Lit 8L); Reg Rsp])
+    ]
+  | ins -> [ins]
+  (* | _ -> failwith "crack not implemented" *)
+
+(* 最后一行为什么不是 _？
+| ins -> [ins]
+变量 ins 保存匹配到的原指令，[ins] 把它包装成单元素列表。例如普通 Addq 不需要拆分，就返回它自身。
+ *)
 
  
 (* TODO: double check against spec *)
