@@ -506,13 +506,125 @@ exception Redefined_sym of lbl
   HINT: List.fold_left and List.fold_right are your friends.
  *)
 let is_size (is: ins list): quad = 
-  failwith "is_size not implemented"
+  Int64.of_int (List.length is) *. ins_size
 
 let ds_size (ds: data list): quad = 
-  failwith "ds_size not implemented"
+  let size_of_data (d: data) : quad =
+    match d with
+    | Quad _ -> 8L
+    | Asciz s -> Int64.of_int (String.length s + 1)
+  in
+  List.fold_left (fun acc d -> acc +. size_of_data d) 0L ds
+  
 
 let assemble (p:prog) : exec =
-  failwith "assemble unimplemented"
+(* pass1 *)
+  (* split text and data *)
+  let is_text (e: elem) : bool =
+    match e.asm with
+    | Text _ -> true
+    | Data _ -> false
+  in
+  let is_data (e: elem) : bool =
+    match e.asm with
+    | Data _ -> true
+    | Text _ -> false
+  in
+  let text_elems = List.filter is_text p in
+  let data_elems = List.filter is_data p in
+  (* parse one block *) 
+  let add_sym (addr, current_table) (e: elem) =
+    let label_name = e.lbl in
+    (* whether label already exists *)
+    let already_exists = List.mem_assoc label_name current_table in
+    if already_exists then
+      raise (Redefined_sym label_name)
+    else
+      (* size *)
+      let block_size = match e.asm with
+        | Text instructions -> is_size instructions
+        | Data data_items   -> ds_size data_items
+      in
+      (* next address *)
+      let next_addr = addr +. block_size in
+      (* new table *)
+      let new_table = (label_name, addr) :: current_table in
+      (next_addr, new_table)
+  in
+  (* ins *)
+  let text_pos = mem_bot in
+  let (data_pos, symtab_after_text) = List.fold_left add_sym (text_pos, []) text_elems in
+  (* data *)
+  let (_, full_symtab) = List.fold_left add_sym (data_pos, symtab_after_text) data_elems in
+  (* main *)
+  let entry = match List.assoc_opt "main" full_symtab with
+    | Some main_address -> main_address
+    | None -> raise (Undefined_sym "main")
+  in
+
+(* pass2 *)
+  (* patch immediate *)
+  let patch_imm (i: imm) : imm =
+    match i with
+    | Lit n -> Lit n
+    | Lbl name ->
+        match List.assoc_opt name full_symtab with
+        | Some addr -> Lit addr
+        | None -> raise (Undefined_sym name)
+  in
+
+  (* patch operand *)
+  let patch_operand (op: operand) : operand =
+    match op with
+    | Imm i       -> Imm (patch_imm i)
+    | Reg r       -> Reg r
+    | Ind1 i      -> Ind1 (patch_imm i)
+    | Ind2 r      -> Ind2 r
+    | Ind3 (i, r) -> Ind3 (patch_imm i, r)
+  in
+
+  (* patch instruction *)
+  let patch_ins (op, args : ins) : ins =
+    let patched_args = List.map patch_operand args in
+    (op, patched_args)
+  in
+
+  (* patch data *)
+  let patch_data (d: data) : data =
+    match d with
+    | Asciz s -> Asciz s
+    | Quad i  -> Quad (patch_imm i)
+  in
+
+  (* serialize text segment *)
+  let process_one_text_elem (e: elem) : sbyte list =
+    match e.asm with
+    | Text instructions ->
+        let patched_instructions = List.map patch_ins instructions in
+        List.concat_map sbytes_of_ins patched_instructions
+    | Data _ -> []
+  in
+  let text_seg = List.concat_map process_one_text_elem text_elems in
+
+  (* serialize data segment *)
+  let process_one_data_elem (e: elem) : sbyte list =
+    match e.asm with
+    | Data data_items ->
+        let patched_items = List.map patch_data data_items in
+        List.concat_map sbytes_of_data patched_items
+    | Text _ -> []
+  in
+  let data_seg = List.concat_map process_one_data_elem data_elems in
+
+  (* return executable *)
+  { entry = entry;
+    text_pos = text_pos;
+    data_pos = data_pos;
+    text_seg = text_seg;
+    data_seg = data_seg;
+  }
+
+
 
 (* Convert an object file into an executable machine state. 
     - allocate the mem array
@@ -528,4 +640,23 @@ let assemble (p:prog) : exec =
   may be of use.
 *)
 let load {entry; text_pos; data_pos; text_seg; data_seg} : mach = 
-   failwith "load not implemented"
+  (* init mem *)
+  let m_mem = Array.make mem_size (Byte '\x00') in
+  let text_offset = map_addr_segfault text_pos in
+  List.iteri (fun i b -> m_mem.(text_offset + i) <- b) text_seg;
+  let data_offset = map_addr_segfault data_pos in
+  List.iteri (fun i b -> m_mem.(data_offset + i) <- b) data_seg;
+
+  (* init regs *)
+  let m_regs = Array.make nregs 0L in
+  m_regs.(rind Rip) <- entry;
+  m_regs.(rind Rsp) <- mem_top -. 8L;
+
+  (* go *)
+  let m = {
+    flags = { fo = false; fs = false; fz = false };
+    regs = m_regs;
+    mem = m_mem;
+  } in
+  writequad m (mem_top -. 8L) exit_addr;
+  m
