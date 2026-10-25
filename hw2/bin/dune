@@ -20,3 +20,9 @@
   x86
   studenttests
   gradedtests))
+
+(executable
+ (name bench)
+ (modules bench)
+ (promote (until-clean))
+ (libraries sim x86 unix))
