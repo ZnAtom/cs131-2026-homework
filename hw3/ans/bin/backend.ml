@@ -2,7 +2,6 @@
 
 open Ll
 open X86
-
 module Platform = Util.Platform
 
 (* Overview ----------------------------------------------------------------- *)
@@ -12,19 +11,17 @@ module Platform = Util.Platform
    plan for implementing the compiler is provided on the project web page.
 *)
 
-
 (* helpers ------------------------------------------------------------------ *)
 
 (* Map LL comparison operations to X86 condition codes *)
 let compile_cnd = function
-  | Ll.Eq  -> X86.Eq
-  | Ll.Ne  -> X86.Neq
+  | Ll.Eq -> X86.Eq
+  | Ll.Ne -> X86.Neq
   | Ll.Slt -> X86.Lt
   | Ll.Sle -> X86.Le
   | Ll.Sgt -> X86.Gt
   | Ll.Sge -> X86.Ge
-
-
+;;
 
 (* locals and layout -------------------------------------------------------- *)
 
@@ -56,13 +53,13 @@ type layout = (uid * X86.operand) list
 
 (* A context contains the global type declarations (needed for getelementptr
    calculations) and a stack layout. *)
-type ctxt = { tdecls : (tid * ty) list
-            ; layout : layout
-            }
+type ctxt =
+  { tdecls : (tid * ty) list
+  ; layout : layout
+  }
 
 (* useful for looking up items in tdecls or layouts *)
 let lookup m x = List.assoc x m
-
 
 (* compiling operands  ------------------------------------------------------ *)
 
@@ -91,14 +88,12 @@ let lookup m x = List.assoc x m
    the X86 instruction that moves an LLVM operand into a designated
    destination (usually a register).
 *)
-let compile_operand (ctxt:ctxt) (dest:X86.operand) : Ll.operand -> ins =
-  function
-  | Null -> (Movq, [Imm (Lit 0L); dest])
-  | Const n -> (Movq, [Imm (Lit n); dest])
-  | Id u -> (Movq, [lookup ctxt.layout u; dest])
-  | Gid g -> (Leaq, [Ind3 (Lbl (Platform.mangle g), Rip); dest])
-
-
+let compile_operand (ctxt : ctxt) (dest : X86.operand) : Ll.operand -> ins = function
+  | Null -> Movq, [ Imm (Lit 0L); dest ]
+  | Const n -> Movq, [ Imm (Lit n); dest ]
+  | Id u -> Movq, [ lookup ctxt.layout u; dest ]
+  | Gid g -> Leaq, [ Ind3 (Lbl (Platform.mangle g), Rip); dest ]
+;;
 
 (* compiling call  ---------------------------------------------------------- *)
 
@@ -151,9 +146,6 @@ let compile_operand (ctxt:ctxt) (dest:X86.operand) : Ll.operand -> ins =
   ]
 *)
 
-
-
-
 (* compiling getelementptr (gep)  ------------------------------------------- *)
 
 (* The getelementptr instruction computes an address by indexing into
@@ -176,16 +168,14 @@ let compile_operand (ctxt:ctxt) (dest:X86.operand) : Ll.operand -> ins =
    - Void, i8, and functions have undefined sizes according to LLVMlite.
      Your function should simply return 0 in those cases
 *)
-let rec size_ty (tdecls:(tid * ty) list) (t:Ll.ty) : int =
+let rec size_ty (tdecls : (tid * ty) list) (t : Ll.ty) : int =
   match t with
   | I1 | I64 | Ptr _ -> 8
   | Array (n, t) -> n * size_ty tdecls t
   | Struct ts -> List.fold_left (fun n t -> n + size_ty tdecls t) 0 ts
   | Namedt id -> size_ty tdecls (lookup tdecls id)
   | Void | I8 | Fun _ -> 0
-
-
-
+;;
 
 (* Generates code that computes a pointer value.
 
@@ -212,40 +202,54 @@ let rec size_ty (tdecls:(tid * ty) list) (t:Ll.ty) : int =
       in (4), but relative to the type f the sub-element picked out
       by the path so far
 *)
-let compile_gep (ctxt:ctxt) (op : Ll.ty * Ll.operand) (path: Ll.operand list) : ins list =
+let compile_gep (ctxt : ctxt) (op : Ll.ty * Ll.operand) (path : Ll.operand list)
+  : ins list
+  =
   let rec unroll = function
     | Namedt id -> unroll (lookup ctxt.tdecls id)
     | t -> t
   in
   let add_scaled index scale =
-    [compile_operand ctxt (Reg R10) index]
-    @ (if scale = 1 then [] else [(Imulq, [Imm (Lit (Int64.of_int scale)); Reg R10])])
-    @ [(Addq, [Reg R10; Reg Rax])]
+    [ compile_operand ctxt (Reg R10) index ]
+    @ (if scale = 1 then [] else [ Imulq, [ Imm (Lit (Int64.of_int scale)); Reg R10 ] ])
+    @ [ Addq, [ Reg R10; Reg Rax ] ]
   in
   let ptr_ty, base = op in
-  let element_ty = match ptr_ty with Ptr t -> t | _ -> failwith "gep base is not a pointer" in
+  let element_ty =
+    match ptr_ty with
+    | Ptr t -> t
+    | _ -> failwith "gep base is not a pointer"
+  in
   match path with
   | [] -> failwith "gep needs an index"
   | first :: rest ->
     let rec walk current = function
       | [] -> []
       | index :: indices ->
-        match unroll current with
-        | Array (_, element) -> add_scaled index (size_ty ctxt.tdecls element) @ walk element indices
-        | Struct fields ->
-          let n = match index with Const n -> Int64.to_int n | _ -> failwith "non-constant struct index" in
-          let before = List.filteri (fun i _ -> i < n) fields in
-          let offset = List.fold_left (fun sum t -> sum + size_ty ctxt.tdecls t) 0 before in
-          let field = List.nth fields n in
-          (if offset = 0 then [] else [(Addq, [Imm (Lit (Int64.of_int offset)); Reg Rax])])
-          @ walk field indices
-        | _ -> failwith "invalid gep index"
+        (match unroll current with
+         | Array (_, element) ->
+           add_scaled index (size_ty ctxt.tdecls element) @ walk element indices
+         | Struct fields ->
+           let n =
+             match index with
+             | Const n -> Int64.to_int n
+             | _ -> failwith "non-constant struct index"
+           in
+           let before = List.filteri (fun i _ -> i < n) fields in
+           let offset =
+             List.fold_left (fun sum t -> sum + size_ty ctxt.tdecls t) 0 before
+           in
+           let field = List.nth fields n in
+           (if offset = 0
+            then []
+            else [ Addq, [ Imm (Lit (Int64.of_int offset)); Reg Rax ] ])
+           @ walk field indices
+         | _ -> failwith "invalid gep index")
     in
-    [compile_operand ctxt (Reg Rax) base]
+    [ compile_operand ctxt (Reg Rax) base ]
     @ add_scaled first (size_ty ctxt.tdecls element_ty)
     @ walk element_ty rest
-
-
+;;
 
 (* compiling instructions  -------------------------------------------------- *)
 
@@ -270,14 +274,25 @@ let compile_gep (ctxt:ctxt) (op : Ll.ty * Ll.operand) (path: Ll.operand list) : 
 
    - Bitcast: does nothing interesting at the assembly level
 *)
-let compile_insn (ctxt:ctxt) ((uid:uid), (i:Ll.insn)) : X86.ins list =
+let compile_insn (ctxt : ctxt) ((uid : uid), (i : Ll.insn)) : X86.ins list =
   let dst = lookup ctxt.layout uid in
-  let move_result = [(Movq, [Reg Rax; dst])] in
-  let scratch_slot = Ind3 (Lit (Int64.of_int (-8 * (List.length ctxt.layout + 1))), Rbp) in
+  let move_result = [ Movq, [ Reg Rax; dst ] ] in
+  let scratch_slot =
+    Ind3 (Lit (Int64.of_int (-8 * (List.length ctxt.layout + 1))), Rbp)
+  in
   let compile_call f args =
-    let regs = [Rdi; Rsi; Rdx; Rcx; R08; R09] in
+    let regs = [ Rdi; Rsi; Rdx; Rcx; R08; R09 ] in
     let register_args, stack_args =
-      let rec split n xs = if n = 0 then [], xs else match xs with [] -> [], [] | x::xs -> let a,b = split (n-1) xs in x::a,b in
+      let rec split n xs =
+        if n = 0
+        then [], xs
+        else (
+          match xs with
+          | [] -> [], []
+          | x :: xs ->
+            let a, b = split (n - 1) xs in
+            x :: a, b)
+      in
       split 6 args
     in
     let rec first n = function
@@ -285,54 +300,96 @@ let compile_insn (ctxt:ctxt) ((uid:uid), (i:Ll.insn)) : X86.ins list =
       | x :: xs -> x :: first (n - 1) xs
       | [] -> []
     in
-    let set_regs = List.map2 (fun (_, o) r -> compile_operand ctxt (Reg r) o) register_args (first (List.length register_args) regs) in
+    let set_regs =
+      List.map2
+        (fun (_, o) r -> compile_operand ctxt (Reg r) o)
+        register_args
+        (first (List.length register_args) regs)
+    in
     let nstack = List.length stack_args in
     let push_args =
       List.rev_map
-        (fun (_, o) -> [compile_operand ctxt (Reg R10) o; (Pushq, [Reg R10])])
+        (fun (_, o) -> [ compile_operand ctxt (Reg R10) o; Pushq, [ Reg R10 ] ])
         stack_args
       |> List.flatten
     in
-    let pad = if nstack mod 2 = 1 then [(Subq, [Imm (Lit 8L); Reg Rsp])] else [] in
-    let target = match f with
-      | Gid g -> [(Movq, [Imm (Lit 0L); Reg Rax]); (Callq, [Imm (Lbl (Platform.mangle g))])]
-      | _ -> [compile_operand ctxt (Reg R11) f; (Movq, [Imm (Lit 0L); Reg Rax]); (Callq, [Reg R11])]
+    let pad = if nstack mod 2 = 1 then [ Subq, [ Imm (Lit 8L); Reg Rsp ] ] else [] in
+    let target =
+      match f with
+      | Gid g ->
+        [ Movq, [ Imm (Lit 0L); Reg Rax ]; Callq, [ Imm (Lbl (Platform.mangle g)) ] ]
+      | _ ->
+        [ compile_operand ctxt (Reg R11) f
+        ; Movq, [ Imm (Lit 0L); Reg Rax ]
+        ; Callq, [ Reg R11 ]
+        ]
     in
-    [(Movq, [Reg Rsp; Reg R11]); (Movq, [Reg R11; scratch_slot]); (Andq, [Imm (Lit (-16L)); Reg Rsp])]
-    @ set_regs @ pad @ push_args @ target
-    @ [(Movq, [scratch_slot; Reg Rsp])]
+    [ Movq, [ Reg Rsp; Reg R11 ]
+    ; Movq, [ Reg R11; scratch_slot ]
+    ; Andq, [ Imm (Lit (-16L)); Reg Rsp ]
+    ]
+    @ set_regs
+    @ pad
+    @ push_args
+    @ target
+    @ [ Movq, [ scratch_slot; Reg Rsp ] ]
   in
   match i with
   | Binop (b, _, lhs, rhs) ->
-    let op = match b with
-      | Add -> Addq | Sub -> Subq | Mul -> Imulq | And -> Andq | Or -> Orq | Xor -> Xorq
-      | Shl -> Shlq | Lshr -> Shrq | Ashr -> Sarq
+    let op =
+      match b with
+      | Add -> Addq
+      | Sub -> Subq
+      | Mul -> Imulq
+      | And -> Andq
+      | Or -> Orq
+      | Xor -> Xorq
+      | Shl -> Shlq
+      | Lshr -> Shrq
+      | Ashr -> Sarq
     in
-    begin match b with
-    | Shl | Lshr | Ashr ->
-      [compile_operand ctxt (Reg Rax) lhs; compile_operand ctxt (Reg Rcx) rhs; (op, [Reg Rcx; Reg Rax])] @ move_result
-    | _ -> [compile_operand ctxt (Reg Rax) lhs; compile_operand ctxt (Reg R10) rhs; (op, [Reg R10; Reg Rax])] @ move_result
-    end
+    (match b with
+     | Shl | Lshr | Ashr ->
+       [ compile_operand ctxt (Reg Rax) lhs
+       ; compile_operand ctxt (Reg Rcx) rhs
+       ; op, [ Reg Rcx; Reg Rax ]
+       ]
+       @ move_result
+     | _ ->
+       [ compile_operand ctxt (Reg Rax) lhs
+       ; compile_operand ctxt (Reg R10) rhs
+       ; op, [ Reg R10; Reg Rax ]
+       ]
+       @ move_result)
   | Icmp (c, _, lhs, rhs) ->
-    [compile_operand ctxt (Reg Rax) lhs; compile_operand ctxt (Reg R10) rhs; (Cmpq, [Reg R10; Reg Rax]);
-     (Movq, [Imm (Lit 0L); Reg Rax]); (Set (compile_cnd c), [Reg Rax])] @ move_result
+    [ compile_operand ctxt (Reg Rax) lhs
+    ; compile_operand ctxt (Reg R10) rhs
+    ; Cmpq, [ Reg R10; Reg Rax ]
+    ; Movq, [ Imm (Lit 0L); Reg Rax ]
+    ; Set (compile_cnd c), [ Reg Rax ]
+    ]
+    @ move_result
   | Alloca t ->
     let n = size_ty ctxt.tdecls t in
-    [(Subq, [Imm (Lit (Int64.of_int n)); Reg Rsp]); (Movq, [Reg Rsp; Reg Rax])] @ move_result
-  | Load (_, p) -> [compile_operand ctxt (Reg Rax) p; (Movq, [Ind2 Rax; Reg Rax])] @ move_result
+    [ Subq, [ Imm (Lit (Int64.of_int n)); Reg Rsp ]; Movq, [ Reg Rsp; Reg Rax ] ]
+    @ move_result
+  | Load (_, p) ->
+    [ compile_operand ctxt (Reg Rax) p; Movq, [ Ind2 Rax; Reg Rax ] ] @ move_result
   | Store (_, v, p) ->
-    [compile_operand ctxt (Reg R10) v; compile_operand ctxt (Reg Rax) p; (Movq, [Reg R10; Ind2 Rax])]
+    [ compile_operand ctxt (Reg R10) v
+    ; compile_operand ctxt (Reg Rax) p
+    ; Movq, [ Reg R10; Ind2 Rax ]
+    ]
   | Call (_, f, args) -> compile_call f args @ move_result
-  | Bitcast (_, o, _) -> [compile_operand ctxt (Reg Rax) o] @ move_result
+  | Bitcast (_, o, _) -> [ compile_operand ctxt (Reg Rax) o ] @ move_result
   | Gep (t, p, path) -> compile_gep ctxt (t, p) path @ move_result
-
-
+;;
 
 (* compiling terminators  --------------------------------------------------- *)
 
 (* prefix the function name [fn] to a label to ensure that the X86 labels are 
    globally unique . *)
-let mk_lbl (fn:string) (l:string) = fn ^ "." ^ l
+let mk_lbl (fn : string) (l : string) = fn ^ "." ^ l
 
 (* Compile block terminators is not too difficult:
 
@@ -346,16 +403,19 @@ let mk_lbl (fn:string) (l:string) = fn ^ "." ^ l
 
    [fn] - the name of the function containing this terminator
 *)
-let compile_terminator (fn:string) (ctxt:ctxt) (t:Ll.terminator) : ins list =
-  let epilogue = [(Movq, [Reg Rbp; Reg Rsp]); (Popq, [Reg Rbp]); (Retq, [])] in
+let compile_terminator (fn : string) (ctxt : ctxt) (t : Ll.terminator) : ins list =
+  let epilogue = [ Movq, [ Reg Rbp; Reg Rsp ]; Popq, [ Reg Rbp ]; Retq, [] ] in
   match t with
   | Ret (_, None) -> epilogue
-  | Ret (_, Some o) -> [compile_operand ctxt (Reg Rax) o] @ epilogue
-  | Br l -> [(Jmp, [Imm (Lbl (mk_lbl fn l))])]
+  | Ret (_, Some o) -> [ compile_operand ctxt (Reg Rax) o ] @ epilogue
+  | Br l -> [ Jmp, [ Imm (Lbl (mk_lbl fn l)) ] ]
   | Cbr (o, yes, no) ->
-    [compile_operand ctxt (Reg Rax) o; (Cmpq, [Imm (Lit 0L); Reg Rax]);
-     (J Neq, [Imm (Lbl (mk_lbl fn yes))]); (Jmp, [Imm (Lbl (mk_lbl fn no))])]
-
+    [ compile_operand ctxt (Reg Rax) o
+    ; Cmpq, [ Imm (Lit 0L); Reg Rax ]
+    ; J Neq, [ Imm (Lbl (mk_lbl fn yes)) ]
+    ; Jmp, [ Imm (Lbl (mk_lbl fn no)) ]
+    ]
+;;
 
 (* compiling blocks --------------------------------------------------------- *)
 
@@ -364,16 +424,16 @@ let compile_terminator (fn:string) (ctxt:ctxt) (t:Ll.terminator) : ins list =
    [ctxt] - the current context
    [blk]  - LLVM IR code for the block
 *)
-let compile_block (fn:string) (ctxt:ctxt) (blk:Ll.block) : ins list =
-  List.concat_map (compile_insn ctxt) blk.insns @ compile_terminator fn ctxt (snd blk.term)
+let compile_block (fn : string) (ctxt : ctxt) (blk : Ll.block) : ins list =
+  List.concat_map (compile_insn ctxt) blk.insns
+  @ compile_terminator fn ctxt (snd blk.term)
+;;
 
 let compile_lbl_block fn lbl ctxt blk : elem =
   Asm.text (mk_lbl fn lbl) (compile_block fn ctxt blk)
-
-
+;;
 
 (* compile_fdecl ------------------------------------------------------------ *)
-
 
 (* Complete this helper function, which computes the location of the nth incoming
    function argument: either in a register or relative to %rbp,
@@ -386,9 +446,14 @@ let compile_lbl_block fn lbl ctxt blk : elem =
 *)
 let arg_loc (n : int) : operand =
   match n with
-  | 0 -> Reg Rdi | 1 -> Reg Rsi | 2 -> Reg Rdx | 3 -> Reg Rcx | 4 -> Reg R08 | 5 -> Reg R09
-  | n -> Ind3 (Lit (Int64.of_int (16 + (n - 6) * 8)), Rbp)
-
+  | 0 -> Reg Rdi
+  | 1 -> Reg Rsi
+  | 2 -> Reg Rdx
+  | 3 -> Reg Rcx
+  | 4 -> Reg R08
+  | 5 -> Reg R09
+  | n -> Ind3 (Lit (Int64.of_int (16 + ((n - 6) * 8))), Rbp)
+;;
 
 (* We suggest that you create a helper function that computes the
    stack layout for a given function declaration.
@@ -399,10 +464,15 @@ let arg_loc (n : int) : operand =
    - see the discussion about locals
 
 *)
-let stack_layout (args : uid list) ((block, lbled_blocks):cfg) : layout =
+let stack_layout (args : uid list) ((block, lbled_blocks) : cfg) : layout =
   let ids_of_block b = List.map fst b.insns in
-  let ids = args @ ids_of_block block @ List.concat_map (fun (_, b) -> ids_of_block b) lbled_blocks in
-  List.mapi (fun i u -> (u, Ind3 (Lit (Int64.of_int (-8 * (i + 1))), Rbp))) ids
+  let ids =
+    args
+    @ ids_of_block block
+    @ List.concat_map (fun (_, b) -> ids_of_block b) lbled_blocks
+  in
+  List.mapi (fun i u -> u, Ind3 (Lit (Int64.of_int (-8 * (i + 1))), Rbp)) ids
+;;
 
 (* The code for the entry-point of a function must do several things:
 
@@ -420,46 +490,56 @@ let stack_layout (args : uid list) ((block, lbled_blocks):cfg) : layout =
    - the function entry code should allocate the stack storage needed
      to hold all of the local stack slots.
 *)
-let compile_fdecl (tdecls:(tid * ty) list) (name:string) ({ f_param; f_cfg; _ }:fdecl) : prog =
+let compile_fdecl
+      (tdecls : (tid * ty) list)
+      (name : string)
+      ({ f_param; f_cfg; _ } : fdecl)
+  : prog
+  =
   let layout = stack_layout f_param f_cfg in
   let ctxt = { tdecls; layout } in
   let frame_bytes = 8 * (List.length layout + 1) in
   let save_args =
     List.mapi
       (fun i u ->
-        let source = arg_loc i in
-        let destination = lookup layout u in
-        match source with
-        | Ind1 _ | Ind2 _ | Ind3 _ -> [(Movq, [source; Reg Rax]); (Movq, [Reg Rax; destination])]
-        | _ -> [(Movq, [source; destination])])
+         let source = arg_loc i in
+         let destination = lookup layout u in
+         match source with
+         | Ind1 _ | Ind2 _ | Ind3 _ ->
+           [ Movq, [ source; Reg Rax ]; Movq, [ Reg Rax; destination ] ]
+         | _ -> [ Movq, [ source; destination ] ])
       f_param
     |> List.flatten
   in
   let entry, labeled = f_cfg in
-  Asm.gtext (Platform.mangle name)
-    ([(Pushq, [Reg Rbp]); (Movq, [Reg Rsp; Reg Rbp]); (Subq, [Imm (Lit (Int64.of_int frame_bytes)); Reg Rsp])]
-     @ save_args @ compile_block name ctxt entry)
+  Asm.gtext
+    (Platform.mangle name)
+    ([ Pushq, [ Reg Rbp ]
+     ; Movq, [ Reg Rsp; Reg Rbp ]
+     ; Subq, [ Imm (Lit (Int64.of_int frame_bytes)); Reg Rsp ]
+     ]
+     @ save_args
+     @ compile_block name ctxt entry)
   :: List.map (fun (lbl, block) -> compile_lbl_block name lbl ctxt block) labeled
-
-
+;;
 
 (* compile_gdecl ------------------------------------------------------------ *)
 (* Compile a global value into an X86 global data declaration and map
    a global uid to its associated X86 label.
 *)
 let rec compile_ginit : ginit -> X86.data list = function
-  | GNull     -> [Quad (Lit 0L)]
-  | GGid gid  -> [Quad (Lbl (Platform.mangle gid))]
-  | GInt c    -> [Quad (Lit c)]
-  | GString s -> [Asciz s]
+  | GNull -> [ Quad (Lit 0L) ]
+  | GGid gid -> [ Quad (Lbl (Platform.mangle gid)) ]
+  | GInt c -> [ Quad (Lit c) ]
+  | GString s -> [ Asciz s ]
   | GArray gs | GStruct gs -> List.map compile_gdecl gs |> List.flatten
-  | GBitcast (_t1,g,_t2) -> compile_ginit g
+  | GBitcast (_t1, g, _t2) -> compile_ginit g
 
 and compile_gdecl (_, g) = compile_ginit g
 
-
 (* compile_prog ------------------------------------------------------------- *)
-let compile_prog {tdecls; gdecls; fdecls; _} : X86.prog =
+let compile_prog { tdecls; gdecls; fdecls; _ } : X86.prog =
   let g = fun (lbl, gdecl) -> Asm.data (Platform.mangle lbl) (compile_gdecl gdecl) in
   let f = fun (name, fdecl) -> compile_fdecl tdecls name fdecl in
-  (List.map g gdecls) @ (List.map f fdecls |> List.flatten)
+  List.map g gdecls @ (List.map f fdecls |> List.flatten)
+;;

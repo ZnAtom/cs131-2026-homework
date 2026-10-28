@@ -1,3 +1,5 @@
+; Expected exit status: 16. Double and sum the positive values: 2 + 6 + 8.
+; Covers an array, dynamic GEP, a loop, conditional branches and helper calls.
 @values = global [4 x i64] [i64 1, i64 -2, i64 3, i64 4]
 
 define i64 @double(i64 %x) {

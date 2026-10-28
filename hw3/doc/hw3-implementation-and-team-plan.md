@@ -95,6 +95,51 @@ make test
 | 我 | 栈布局、函数/控制流、基础运算 | 实现 `arg_loc`、`stack_layout`、`compile_fdecl`、`compile_block`、`compile_terminator`、`compile_operand`；在 `compile_insn` 中实现 `Binop`、`Icmp`、`Bitcast`。补充算术、返回、跳转和条件分支测试。 |
 | 队友 | 内存、类型尺寸、地址计算、函数调用 | 实现 `size_ty`、`compile_gep`；在 `compile_insn` 中实现 `Alloca`、`Load`、`Store`、`Call`、`Gep`。补充内存、全局变量、递归/多参数调用、GEP、字符串和对齐测试。 |
 
+### “我”负责部分：已实现
+
+实现位置：`hw3/stub(4)/stub/bin/backend.ml`。以 `hw3/ans/bin/backend.ml` 为参考，已完成以下内容：
+
+| 函数/分支 | 当前实现 |
+| --- | --- |
+| `compile_operand` | `Null` 变为 0，`Const` 使用立即数，`Id` 从 `layout` 对应栈槽读取，`Gid` 经 `Platform.mangle` 后使用 RIP-relative `leaq` 取得地址。当前调用处的目标都是寄存器，避免生成内存到内存的 `movq`。 |
+| `arg_loc` | 参数 0 至 5 使用 `rdi/rsi/rdx/rcx/r8/r9`；第 `n ≥ 6` 个参数使用 `16 + 8 × (n − 6)` 字节的 `rbp` 正偏移。`rbp + 8` 是返回地址，因此第七个参数从 `rbp + 16` 开始。 |
+| `stack_layout` | 按参数、入口 block 指令、其余 block 指令的顺序收集 `uid`，依次分配 `rbp - 8`、`rbp - 16` 等槽位。与 `ans` 一致，所有普通指令的标识符都分配槽位，包括解析器为 `Store` 等生成的标识符；terminator 不分配槽位。 |
+| `compile_fdecl` | 保存旧 `rbp`，建立栈帧，分配所有栈槽并复制参数；对于栈上传入的参数，用 `rax` 中转复制。函数入口用 `Asm.gtext` 导出，后续 block 通过 `compile_lbl_block` 生成。 |
+| `compile_block` | 按顺序拼接所有普通指令的编译结果，最后拼接 terminator。允许 block 不含普通指令。 |
+| `compile_terminator` | `Ret` 将返回值送入 `rax`，再恢复 `rsp/rbp` 并 `retq`；`Br` 无条件跳转；`Cbr` 将条件与 0 比较后跳向真/假标签。各 block 标签使用 `函数名.block名`。 |
+| `Binop` | 支持全部九种运算。左值放 `rax`，普通右值放 `r10`，移位量放 `rcx` 以使用 `cl`；结果写回当前 `uid` 的栈槽。 |
+| `Icmp` | 先执行 `cmpq rhs, lhs`，再用不改变条件标志的 `movq $0, %rax` 清零结果寄存器，最后执行 `setcc`。结果完整为 64 位的 0 或 1。 |
+| `Bitcast` | 将原值读入 `rax`，原样写入结果栈槽。 |
+
+与队友合并时保持以下约定：
+
+- `rax` 保存主要计算结果，`r10` 保存普通右操作数，`rcx` 保存动态移位量；LLVM 局部值始终以栈槽为准。
+- `compile_fdecl` 额外预留一个 8 字节槽位：若 `layout` 有 `N` 个条目，该槽位是 `rbp - 8 × (N + 1)`。队友可按 `ans` 的 `Call` 实现，用它保存调用前的 `rsp`，在对齐、传栈参数和调用后恢复栈顶。
+- `compile_insn` 中 `Alloca`、`Load`、`Store`、`Call`、`Gep` 已分别保留明确的待实现分支；队友替换对应 `failwith` 即可。`size_ty`、`compile_gep` 也仍由队友实现。
+
+### “我”负责部分：测试与验证
+
+已在 `hw3/stub(4)/stub/test/studenttests.ml` 中添加 25 项不计分的开发测试（使用 `Test`，不改变评分权重）：
+
+| 测试组 | 数量 | 覆盖内容 |
+| --- | --- | --- |
+| 算术与 bitcast | 7 | 64 位加法溢出、局部值运算、动态左移、负数逻辑/算术右移、bitcast 位模式保留、null 为 0。 |
+| 带符号比较 | 12 | 六种比较操作、相等边界、最小/最大有符号整数、比较结果的高位清零。 |
+| 分支与操作数 | 4 | 真/假条件分支、空 block、无条件跳转、后续 block 的栈槽、入口参数读取、全局地址取值。 |
+| 函数入口与退出 | 2 | 通过 C 调用生成的 LLVMlite 函数，验证八参数接收（包括两个栈参数）和空 `void` 函数的栈帧恢复；不依赖尚未实现的 LLVMlite `Call`。 |
+
+验证结果：在现有 `cs131-dev:latest` Docker 镜像中 `dune build` 成功；在临时副本仅运行 `Studenttests.provided_tests`，结果为 **25/25 通过**。原项目测试入口和 `gradedtests.ml` 保持原样。
+
+在课程容器内进入 `stub(4)/stub` 后，可以执行：
+
+```bash
+eval "$(opam env)"
+chmod +x bin/timeout3
+make test
+```
+
+新增的四组测试会先运行。由于队友部分尚未合并，完整评分套件中的内存、调用和 GEP 等测试仍会报未实现；上述 25/25 仅表示本次分工范围的测试通过，不代表整个 HW3 已完成。
+
 ### 建议的协作边界
 
 - 共同先确定 `stack_layout` 的偏移格式、`arg_loc` 对第 7 个及以后参数的偏移，以及临时寄存器用途。例如可统一采用 `rax` 存主计算值，`r10`/`r11` 存辅助操作数，动态 shift 使用 `rcx`。

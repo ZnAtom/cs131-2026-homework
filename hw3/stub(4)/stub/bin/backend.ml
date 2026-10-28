@@ -92,7 +92,12 @@ let lookup m x = List.assoc x m
    destination (usually a register).
 *)
 let compile_operand (ctxt:ctxt) (dest:X86.operand) : Ll.operand -> ins =
-  function _ -> failwith "compile_operand unimplemented"
+  function
+  | Null -> (Movq, [Imm (Lit 0L); dest])
+  | Const n -> (Movq, [Imm (Lit n); dest])
+  | Id u -> (Movq, [lookup ctxt.layout u; dest])
+  | Gid g -> (Leaq, [Ind3 (Lbl (Platform.mangle g), Rip); dest])
+  
 
 
 
@@ -232,7 +237,36 @@ failwith "compile_gep not implemented"
    - Bitcast: does nothing interesting at the assembly level
 *)
 let compile_insn (ctxt:ctxt) ((uid:uid), (i:Ll.insn)) : X86.ins list =
-      failwith "compile_insn not implemented"
+  let move_result = [(Movq, [Reg Rax; lookup ctxt.layout uid])] in
+  match i with
+  | Binop (b, _, lhs, rhs) ->
+    let op = match b with
+      | Add -> Addq | Sub -> Subq | Mul -> Imulq
+      | And -> Andq | Or -> Orq | Xor -> Xorq
+      | Shl -> Shlq | Lshr -> Shrq | Ashr -> Sarq
+    in
+    let rhs_reg = match b with
+      | Shl | Lshr | Ashr -> Rcx
+      | _ -> R10
+    in
+    [compile_operand ctxt (Reg Rax) lhs;
+     compile_operand ctxt (Reg rhs_reg) rhs;
+     (op, [Reg rhs_reg; Reg Rax])] @ move_result
+  | Icmp (c, _, lhs, rhs) ->
+    [compile_operand ctxt (Reg Rax) lhs;
+     compile_operand ctxt (Reg R10) rhs;
+     (Cmpq, [Reg R10; Reg Rax]);
+     (* movq preserves the flags while clearing the upper bytes for setcc. *)
+     (Movq, [Imm (Lit 0L); Reg Rax]);
+     (Set (compile_cnd c), [Reg Rax])] @ move_result
+  | Bitcast (_, o, _) ->
+    [compile_operand ctxt (Reg Rax) o] @ move_result
+  (* Teammate: memory, function calls, and address calculations. *)
+  | Alloca _ -> failwith "compile_insn Alloca not implemented"
+  | Load _ -> failwith "compile_insn Load not implemented"
+  | Store _ -> failwith "compile_insn Store not implemented"
+  | Call _ -> failwith "compile_insn Call not implemented"
+  | Gep _ -> failwith "compile_insn Gep not implemented"
 
 
 
@@ -255,7 +289,18 @@ let mk_lbl (fn:string) (l:string) = fn ^ "." ^ l
    [fn] - the name of the function containing this terminator
 *)
 let compile_terminator (fn:string) (ctxt:ctxt) (t:Ll.terminator) : ins list =
-  failwith "compile_terminator not implemented"
+  let epilogue =
+    [(Movq, [Reg Rbp; Reg Rsp]); (Popq, [Reg Rbp]); (Retq, [])]
+  in
+  match t with
+  | Ret (_, None) -> epilogue
+  | Ret (_, Some o) -> [compile_operand ctxt (Reg Rax) o] @ epilogue
+  | Br l -> [(Jmp, [Imm (Lbl (mk_lbl fn l))])]
+  | Cbr (o, yes, no) ->
+    [compile_operand ctxt (Reg Rax) o;
+     (Cmpq, [Imm (Lit 0L); Reg Rax]);
+     (J Neq, [Imm (Lbl (mk_lbl fn yes))]);
+     (Jmp, [Imm (Lbl (mk_lbl fn no))])]
 
 
 (* compiling blocks --------------------------------------------------------- *)
@@ -266,7 +311,8 @@ let compile_terminator (fn:string) (ctxt:ctxt) (t:Ll.terminator) : ins list =
    [blk]  - LLVM IR code for the block
 *)
 let compile_block (fn:string) (ctxt:ctxt) (blk:Ll.block) : ins list =
-  failwith "compile_block not implemented"
+  List.concat_map (compile_insn ctxt) blk.insns
+  @ compile_terminator fn ctxt (snd blk.term)
 
 let compile_lbl_block fn lbl ctxt blk : elem =
   Asm.text (mk_lbl fn lbl) (compile_block fn ctxt blk)
@@ -286,7 +332,10 @@ let compile_lbl_block fn lbl ctxt blk : elem =
    [ NOTE: the first six arguments are numbered 0 .. 5 ]
 *)
 let arg_loc (n : int) : operand =
-failwith "arg_loc not implemented"
+  match n with
+  | 0 -> Reg Rdi | 1 -> Reg Rsi | 2 -> Reg Rdx
+  | 3 -> Reg Rcx | 4 -> Reg R08 | 5 -> Reg R09
+  | n -> Ind3 (Lit (Int64.of_int (16 + (n - 6) * 8)), Rbp)
 
 
 (* We suggest that you create a helper function that computes the
@@ -299,7 +348,13 @@ failwith "arg_loc not implemented"
 
 *)
 let stack_layout (args : uid list) ((block, lbled_blocks):cfg) : layout =
-failwith "stack_layout not implemented"
+  let ids_of_block b = List.map fst b.insns in
+  let ids = args @ ids_of_block block
+    @ List.concat_map (fun (_, b) -> ids_of_block b) lbled_blocks
+  in
+  List.mapi
+    (fun i u -> (u, Ind3 (Lit (Int64.of_int (-8 * (i + 1))), Rbp)))
+    ids
 
 (* The code for the entry-point of a function must do several things:
 
@@ -318,7 +373,31 @@ failwith "stack_layout not implemented"
      to hold all of the local stack slots.
 *)
 let compile_fdecl (tdecls:(tid * ty) list) (name:string) ({ f_param; f_cfg; _ }:fdecl) : prog =
-failwith "compile_fdecl unimplemented"
+  let layout = stack_layout f_param f_cfg in
+  let ctxt = { tdecls; layout } in
+  (* Reserve one extra slot for the saved rsp used by ans's call compiler. *)
+  let frame_bytes = 8 * (List.length layout + 1) in
+  let save_args =
+    List.mapi
+      (fun i u ->
+        let source = arg_loc i in
+        let destination = lookup layout u in
+        match source with
+        | Ind1 _ | Ind2 _ | Ind3 _ ->
+          (* x86 does not support a memory-to-memory movq. *)
+          [(Movq, [source; Reg Rax]); (Movq, [Reg Rax; destination])]
+        | _ -> [(Movq, [source; destination])])
+      f_param
+    |> List.flatten
+  in
+  let entry, labeled = f_cfg in
+  Asm.gtext (Platform.mangle name)
+    ([(Pushq, [Reg Rbp]); (Movq, [Reg Rsp; Reg Rbp]);
+      (Subq, [Imm (Lit (Int64.of_int frame_bytes)); Reg Rsp])]
+     @ save_args @ compile_block name ctxt entry)
+  :: List.map
+       (fun (lbl, block) -> compile_lbl_block name lbl ctxt block)
+       labeled
 
 
 
